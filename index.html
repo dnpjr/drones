@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Drone Swarm Radar — Single-file Html App (v20)</title>
+  <style>
+    :root{ --bg:#000; --ink:#fff; --locked:#ff4d4d; --defender:#4ea3ff; }
+    html,body{height:100%}
+    body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial;overflow:hidden}
+    canvas{display:block;width:100%;height:100%;background:var(--bg)}
+    .note{position:fixed;left:10px;top:10px;color:#bbb;font-size:12px;opacity:.85}
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+
+  <script>
+  'use strict';
+  // ===== Canvas & safe defaults =====
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let W = window.innerWidth  || 1280;
+  let H = window.innerHeight || 720;
+
+  // ===== Tower & radar =====
+  const tower = { x: 170, y: H-160, r: 280, h: 160, sweep: 0, sweepSpeed: 1.2, span: Math.PI/18 };
+
+  // Entities
+  const enemies = [];
+  const defenders = [];
+  const pops = [];
+
+  // ===== Helpers =====
+  const rand=(a=0,b=1)=>a+Math.random()*(b-a);
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const seek=(ax,ay,bx,by)=>{const dx=bx-ax,dy=by-ay;const d=Math.hypot(dx,dy)||1;return {x:dx/d,y:dy/d,d}};
+  function radarHead(){ return { x: tower.x, y: tower.y - tower.h - 10 }; }
+  function getBeamDir(){ return tower.sweep + Math.PI/2; } // beam ⟂ to rod
+  function resize(){ W=canvas.width=window.innerWidth; H=canvas.height=window.innerHeight; tower.y=H-160; }
+  window.addEventListener('resize', resize);
+
+  // ===== Spawning =====
+  function spawnEnemy(){
+    const x = rand(0,W); const y = -30 - rand(0, H*0.25);
+    const base = 22 + rand(0,12);
+    return { x,y, vx:0, vy:0, speed: base, maxSpeed: base*1.15, jitter: rand(0,1000), detected:false, locked:false, assigned:false, dead:false };
+  }
+  const PAD_OFFSETS = [ {dx:-60,dy:38},{dx:-30,dy:38},{dx:0,dy:38},{dx:30,dy:38},{dx:60,dy:38}, {dx:-45,dy:64},{dx:-15,dy:64},{dx:15,dy:64},{dx:45,dy:64} ];
+  let padIndex=0;
+  function defenderSpawnPoint(){ const o=PAD_OFFSETS[padIndex++ % PAD_OFFSETS.length]; return { x:tower.x+o.dx+rand(-6,6), y:tower.y+o.dy+rand(-4,4) }; }
+  function spawnDefender(target){ const p=defenderSpawnPoint(); defenders.push({ x:p.x, y:p.y, speed: 190, boost:1, target, dead:false }); }
+
+  // ===== Simulation params =====
+  const SEP_EN = 16, SEP_DEF = 16, SEP_CROSS = 10;
+  const SWEEP_RANGE = () => tower.r*2;
+  const FORCE_INTERCEPT_DIST = () => Math.max(34, tower.r*0.35);
+  const INSTANT_POP_DIST    = () => Math.max(14, tower.r*0.12);
+
+  // ===== Sim loop state =====
+  let paused=false, last=0;
+
+  function step(dt){
+    tower.sweep = (tower.sweep + tower.sweepSpeed*dt) % (Math.PI*2);
+    if(enemies.length < 22 && Math.random() < 0.026) enemies.push(spawnEnemy());
+
+    const head = radarHead();
+    const beamDir = getBeamDir();
+
+    for(const e of enemies){
+      if(e.dead) continue;
+      e.jitter += dt*0.6;
+      const to = seek(e.x,e.y,tower.x,tower.y);
+      const wanderAng = (Math.sin(e.jitter*1.3)+Math.cos(e.jitter*1.17))*0.25;
+      let vx = Math.cos(Math.atan2(to.y,to.x)+wanderAng)*0.5;
+      let vy = Math.sin(Math.atan2(to.y,to.x)+wanderAng)*0.5;
+
+      for(const o of enemies){ if(o===e||o.dead) continue; const dx=e.x-o.x, dy=e.y-o.y; const d=Math.hypot(dx,dy); if(d>0 && d<SEP_EN){ vx += (dx/d)*(SEP_EN-d)*0.02; vy += (dy/d)*(SEP_EN-d)*0.02; } }
+
+      const mag=Math.hypot(vx,vy)||1; vx/=mag; vy/=mag;
+      const sp = clamp(e.speed, 10, e.maxSpeed);
+      e.vx = vx * sp * dt; e.vy = vy * sp * dt; e.x += e.vx; e.y += e.vy;
+
+      // Detection by beam (⟂ to rod)
+      const angTo = Math.atan2(e.y-head.y, e.x-head.x);
+      const inBeam = Math.abs(((angTo - beamDir + Math.PI*3)%(Math.PI*2))-Math.PI) < tower.span;
+      const distHead = Math.hypot(e.x-head.x, e.y-head.y);
+      if(!e.detected && inBeam && distHead <= SWEEP_RANGE()){
+        e.detected=true; if(!e.assigned){ e.assigned=true; spawnDefender(e);} }
+
+      if(!e.locked && e.detected && distHead <= tower.r){ e.locked = true; }
+
+      if(e.locked && distHead < FORCE_INTERCEPT_DIST()){
+        let best=null, bd=1e9; for(const d of defenders){ if(d.dead) continue; const dx=d.x-e.x, dy=d.y-e.y; const dd=dx*dx+dy*dy; if(dd<bd){bd=dd; best=d;} }
+        if(!best){ spawnDefender(e); best = defenders[defenders.length-1]; }
+        best.target=e; best.boost = Math.max(best.boost||1, 2.2);
+        const v = seek(best.x,best.y,e.x,e.y); if(v.d < INSTANT_POP_DIST()){ pops.push({x:e.x,y:e.y,a:1}); best.dead=true; e.dead=true; }
+      }
+
+      if(e.y > H + 140) e.dead = true;
+    }
+
+    for(const d of defenders){
+      if(d.dead || !d.target || d.target.dead){ d.dead=true; continue; }
+      d.speed = d.target.speed; d.boost = Math.max(1, d.boost||1);
+      const v=seek(d.x,d.y,d.target.x,d.target.y); d.x += v.x*d.speed*d.boost*dt; d.y += v.y*d.speed*d.boost*dt; if(v.d<11){ pops.push({x:d.target.x,y:d.target.y,a:1}); d.dead=true; d.target.dead=true; }
+      d.boost = Math.max(1, d.boost - dt*0.8);
+    }
+
+    separatePairs(enemies, SEP_EN);
+    separatePairs(defenders, SEP_DEF);
+    separateCross(enemies, defenders, SEP_CROSS);
+
+    for(const p of pops){ p.a -= dt*6; }
+
+    for(let i=enemies.length-1;i>=0;i--) if(enemies[i].dead) enemies.splice(i,1);
+    for(let i=defenders.length-1;i>=0;i--) if(defenders[i].dead) defenders.splice(i,1);
+    for(let i=pops.length-1;i>=0;i--) if(pops[i].a<=0) pops.splice(i,1);
+  }
+
+  // ===== Separation helpers =====
+  function separatePairs(list, minDist){
+    for(let i=0;i<list.length;i++){
+      const a=list[i]; if(!a || a.dead) continue;
+      for(let j=i+1;j<list.length;j++){
+        const b=list[j]; if(!b || b.dead) continue;
+        const dx=b.x-a.x, dy=b.y-a.y; const d=Math.hypot(dx,dy);
+        if(d>0 && d<minDist){ const push=(minDist-d)/2; const nx=dx/d, ny=dy/d; a.x -= nx*push; a.y -= ny*push; b.x += nx*push; b.y += ny*push; }
+      }
+    }
+  }
+  function separateCross(A,B,minDist){
+    for(const a of A){ if(a.dead) continue; for(const b of B){ if(b.dead) continue; if(b.target===a) continue; const dx=b.x-a.x, dy=b.y-a.y; const d=Math.hypot(dx,dy); if(d>0 && d<minDist){ const push=(minDist-d)/2; const nx=dx/d, ny=dy/d; a.x -= nx*push; a.y -= ny*push; b.x += nx*push; b.y += ny*push; } }}
+  }
+
+  // ===== Drawing =====
+  function drawDroneProfile(x,y,color,size=9){
+    ctx.save(); ctx.translate(x,y); ctx.strokeStyle=color; ctx.lineWidth=1.2;
+    ctx.beginPath(); ctx.rect(-size*0.35, -size*0.9, size*0.7, size*1.8); ctx.stroke();
+    const arm = size*1.2, r=size*0.5; const pts=[[arm,arm],[arm,-arm],[-arm,arm],[-arm,-arm]];
+    for(const [ax,ay] of pts){ ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(ax*0.7,ay*0.7); ctx.stroke(); ctx.beginPath(); ctx.arc(ax,ay,r,0,Math.PI*2); ctx.stroke(); }
+    ctx.restore();
+  }
+
+  function drawTower(){
+    const x=tower.x, y=tower.y, h=tower.h, w=60; const head=radarHead();
+    ctx.save();
+    ctx.strokeStyle='#888'; ctx.lineWidth=1; ctx.beginPath(); ctx.rect(x-w, y+20, w*2, 14); ctx.stroke();
+
+    ctx.lineWidth=1; ctx.strokeStyle='#aaa';
+    ctx.beginPath(); ctx.moveTo(x-w/3,y); ctx.lineTo(x-w/6, y-h);
+    ctx.moveTo(x+w/3,y); ctx.lineTo(x+w/6, y-h);
+    ctx.moveTo(x,y); ctx.lineTo(x, y-h);
+    ctx.stroke();
+
+    ctx.beginPath(); const levels=8; for(let i=0;i<levels;i++){ const y1=y - (i*(h/levels)); const y2=y - ((i+1)*(h/levels)); ctx.moveTo(x-w/3,y1); ctx.lineTo(x+w/3,y2); ctx.moveTo(x+w/3,y1); ctx.lineTo(x-w/3,y2); ctx.moveTo(x-w/3,y2); ctx.lineTo(x+w/3,y2);} ctx.stroke();
+
+    ctx.strokeStyle='#bbb'; ctx.strokeRect(x+w/3+6, y-40, 24, 28); ctx.strokeRect(x-w/3-30, y-60, 24, 18);
+
+    ctx.save(); ctx.lineWidth=2; ctx.strokeStyle='#ddd';
+    ctx.beginPath(); ctx.moveTo(head.x, y-h); ctx.lineTo(head.x, head.y); ctx.stroke();
+    ctx.translate(head.x, head.y); ctx.rotate(tower.sweep); ctx.beginPath(); ctx.moveTo(-82/2,0); ctx.lineTo(82/2,0); ctx.stroke(); ctx.restore();
+
+    ctx.restore();
+  }
+
+// ===== Beam: symmetric trapezoid (base = rod ends, sides diverge, circular top) =====
+function drawBeamFullBar(){
+  const head = radarHead();
+  const dir  = getBeamDir();      // forward (⊥ to rod)
+  const span = tower.span;        // half-angle the sides flare at
+  const R    = SWEEP_RANGE();     // radius of the outer arc
+
+  // Rod direction is perpendicular to the beam direction
+  const rodAngle = tower.sweep; // actual rotation of rod
+  const ux = Math.cos(rodAngle), uy = Math.sin(rodAngle);
+
+  // Rod endpoints A (left) and B (right) in world coords
+  const rodHalf = 41; // half rod length
+  const A = { x: head.x - ux*rodHalf, y: head.y - uy*rodHalf };
+  const B = { x: head.x + ux*rodHalf, y: head.y + uy*rodHalf };
+
+  // Side directions (diverging)
+  const vL = { x: Math.cos(dir + span), y: Math.sin(dir + span) }; // from A
+  const vR = { x: Math.cos(dir - span), y: Math.sin(dir - span) }; // from B
+
+  // Ray→circle intersection
+  function rayCircle(P, v){
+    const rx = v.x, ry = v.y;
+    const px = P.x - head.x, py = P.y - head.y;
+    const dot  = px*rx + py*ry;
+    const disc = dot*dot - (px*px + py*py - R*R);
+    if (disc < 0) return { x:P.x, y:P.y };
+    let t = -dot + Math.sqrt(disc);
+    if (t < 0) t = -dot - Math.sqrt(disc);
+    return { x: P.x + rx*t, y: P.y + ry*t };
+  }
+
+  // Outer arc endpoints
+  const D = rayCircle(A, vL); // top-left
+  const C = rayCircle(B, vR); // top-right
+
+  // Arc angles
+  let aL = Math.atan2(D.y - head.y, D.x - head.x);
+  let aR = Math.atan2(C.y - head.y, C.x - head.x);
+
+  const TWO_PI = Math.PI * 2;
+  let delta = (aL - aR) % TWO_PI; if (delta < 0) delta += TWO_PI;
+  const anticlockwise = delta > Math.PI;
+
+  // Draw shape
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = 'rgba(200,200,200,0.30)';
+
+  ctx.beginPath();
+  ctx.moveTo(A.x, A.y);           // base left
+  ctx.lineTo(B.x, B.y);           // base right
+  ctx.lineTo(C.x, C.y);           // right side
+  ctx.arc(head.x, head.y, R, aR, aL, anticlockwise); // arc top
+  ctx.lineTo(A.x, A.y);           // left side
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
+}
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+
+    const head = radarHead();
+
+    // Beam first
+    drawBeamFullBar();
+
+    // Inner dashed radius — RED and centered at HEAD
+    ctx.setLineDash([6,6]); ctx.strokeStyle=getVar('--locked'); ctx.lineWidth=1; ctx.beginPath(); ctx.arc(head.x,head.y,tower.r,0,Math.PI*2); ctx.stroke(); ctx.setLineDash([]);
+
+    // Tracking links from head
+    for(const e of enemies){ if(e.dead || !e.detected) continue; const distHead=Math.hypot(e.x-head.x, e.y-head.y); const col = (e.locked || distHead<=tower.r) ? getVar('--locked') : '#fff'; ctx.strokeStyle=col; ctx.lineWidth=0.8; ctx.beginPath(); ctx.moveTo(head.x,head.y); ctx.lineTo(e.x,e.y); ctx.stroke(); }
+
+    // Drones
+    for(const e of enemies){ if(e.dead) continue; drawDroneProfile(e.x,e.y, e.locked ? getVar('--locked') : '#fff'); }
+    for(const d of defenders){ if(d.dead) continue; drawDroneProfile(d.x,d.y, getVar('--defender')); }
+
+    // Pops
+    for(const p of pops){ ctx.globalAlpha=p.a; ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(p.x,p.y,5,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1; }
+
+    // Tower last
+    drawTower();
+  }
+
+  function getVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  // ===== Lightweight runtime tests =====
+  function runTests(){
+    const diff = ((getBeamDir() - (tower.sweep + Math.PI/2) + Math.PI*3)%(Math.PI*2))-Math.PI;
+    console.assert(Math.abs(diff) < 1e-6, 'Beam not perpendicular to rod');
+    for(let k=0;k<5;k++){
+      const a=enemies[(Math.random()*enemies.length)|0], b=enemies[(Math.random()*enemies.length)|0];
+      if(a&&b&&a!==b) console.assert(Math.hypot(a.x-b.x,a.y-b.y) >= SEP_EN-1, 'Enemy overlap');
+    }
+    try { drawBeamFullBar(); } catch (e) { console.error('Beam draw failed', e); }
+  }
+  setInterval(runTests, 5000);
+
+  // ===== Loop =====
+  function loop(now){ const dt=Math.min(0.05,(now-last)/1000||0.016); last=now||performance.now(); if(!paused) step(dt); draw(); requestAnimationFrame(loop); }
+  function init(){ resize(); for(let i=0;i<5;i++) enemies.push(spawnEnemy()); last=performance.now(); requestAnimationFrame(loop); }
+  if(document.readyState==='loading') window.addEventListener('DOMContentLoaded', init); else init();
+  </script>
+</body>
+</html>
