@@ -196,7 +196,7 @@ applyView();
   }
   function spawnDefender(target){
     const p=defenderSpawnPoint();
-    defenders.push({ x:p.x, y:p.y, speed: 190 * SPEED_SCALE, boost:1, target, dead:false });
+    defenders.push({ x:p.x, y:p.y, speed: 190 * SPEED_SCALE * 1.1, boost:1, target, dead:false });
   }
 
   // ===== Simulation params =====
