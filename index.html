@@ -62,8 +62,10 @@
   // Framing: ensure the red detection ring fits in the bottom-left quadrant
   const FRAMING = {
   mode: 'cover',
-  pad: 6,          // was 12 — smaller pad => larger scale while still in-frame
-  frac: 0.58       // NEW: portion of the screen used for the “quadrant” (0.5 = exact quadrant)
+  pad: 1,          // used for FIT (scaling the scene)
+  frac: 0.6,       // portion of screen reserved for the circle (0.5 = quadrant)
+  // Placement pad (equal distance from LEFT and BOTTOM in screen px or %):
+  posPadPct: 0.02 // or use % of the shorter screen side instead of px
 };
 
   function applyView(){
@@ -91,31 +93,44 @@
     canvas.height = Math.round(sh * VIEW.dpr);
 
     // Base scale from mode
-    const scaleCover   = Math.max(sw / WORLD.w, sh / WORLD.h);
-    const scaleContain = Math.min(sw / WORLD.w, sh / WORLD.h);
-    let scale = (FRAMING.mode === 'contain') ? scaleContain : scaleCover;
+const scaleCover   = Math.max(sw / WORLD.w, sh / WORLD.h);
+const scaleContain = Math.min(sw / WORLD.w, sh / WORLD.h);
+let baseScale = (FRAMING.mode === 'contain') ? scaleContain : scaleCover;
 
-    // --- Fit the detection circle entirely into the bottom-left quadrant ---
-    const pad = FRAMING.pad;
-    const frac = FRAMING.frac ?? 0.5;   // default stays 0.5 if you omit it
-    const quadW = sw * frac - pad*2;
-    const quadH = sh * frac - pad*2;
-    const rWorld = tower.r;
-    // Max scale so that 2*rWorld fits inside usable quad size
-    const fitScale = Math.max(0.001, Math.min(quadW / (2*rWorld), quadH / (2*rWorld)));
-    // Final scale: don't exceed fitScale
-    VIEW.scale = Math.min(scale, fitScale);
+// --- FIT: guarantee the red ring fits in a fraction of the screen with fitPad ---
+const fitPad = FRAMING.pad;                   // used only for fit
+const frac   = FRAMING.frac ?? 0.5;
+const usableW = sw * frac - fitPad * 2;
+const usableH = sh * frac - fitPad * 2;
+const rWorld  = tower.r;
+const fitScale = Math.max(0.001, Math.min(usableW / (2 * rWorld), usableH / (2 * rWorld)));
 
-    // Place the head so the circle sits snug inside the bottom-left quadrant with padding
-    const rPx = rWorld * VIEW.scale;
-    const sx = pad + rPx;            // target screen X for head (left inside quadrant)
-    const sy = sh - pad - rPx;       // target screen Y for head (bottom inside quadrant)
+// Final scale: don’t exceed the fit limit
+VIEW.scale = Math.min(baseScale, fitScale);
 
-    // Solve for view offsets (screen = ox + world*scale)
-    VIEW.ox = sx - tower.x * VIEW.scale;
-    VIEW.oy = sy - tower.y * VIEW.scale;
+// ---- after you compute VIEW.scale and have sw/sh ----
 
-    applyView();
+// circle radius in pixels at this scale
+const rPx = tower.r * VIEW.scale;
+
+// desired equal pad (choose px or %)
+let posPad = (typeof FRAMING.posPadPx === 'number')
+  ? FRAMING.posPadPx
+  : Math.round((FRAMING.posPadPct ?? 0) * Math.min(sw, sh));
+
+// clamp so the circle never clips top/right
+const posPadMax = Math.max(0, Math.min(sw - 2*rPx, sh - 2*rPx));
+posPad = Math.max(0, Math.min(posPad, posPadMax));
+
+// equal margins: left distance = bottom distance = posPad
+const sx = posPad + rPx;           // center X on screen
+const sy = sh - posPad - rPx;      // center Y on screen
+
+// solve view offsets (screen = ox + world*scale)
+VIEW.ox = sx - tower.x * VIEW.scale;
+VIEW.oy = sy - tower.y * VIEW.scale;
+
+applyView();
   }
 
   // Visible world rectangle (what the screen shows, in world units)
@@ -151,7 +166,7 @@
   const rand=(a=0,b=1)=>a+Math.random()*(b-a);
   const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
   const seek=(ax,ay,bx,by)=>{const dx=bx-ax,dy=by-ay;const d=Math.hypot(dx,dy)||1;return {x:dx/d,y:dy/d,d}};
-  function radarHead(){ return { x: tower.x, y: tower.y - tower.h - 10 }; }
+  function radarHead(){ return { x: tower.x, y: tower.y }; }
   function getBeamDir(){ return tower.sweep + Math.PI/2; }
   function getVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
