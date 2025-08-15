@@ -7,36 +7,34 @@
   <style>
     :root{
       /* Palette */
-      --bg:#070b12;              /* night-ops background */
-      --ink:#ffffff;             /* primary ink */
-      --hud:#9de1ff;             /* HUD accents */
-      --locked:#ff5b5b;          /* hostile/lock */
-      --defender:#31c9ff;        /* friendly */
-      --accent:#00ffd5;          /* highlights */
-      --dim:#6c8793;             /* subdued text */
-      --grid:#343434;            /* cartesian grid */
+      --bg:#070b12;
+      --ink:#ffffff;
+      --hud:#9de1ff;
+      --locked:#ff5b5b;
+      --defender:#31c9ff;
+      --accent:#00ffd5;
+      --dim:#6c8793;
+      --grid:#343434;
 
-      /* Beam tuning */
-      --beam-core: rgba(255, 255, 255, 0.1);  
-      --beam-fill: rgba(255, 255, 255, 0.15);   
+      /* Beam tuning (body tint; NVG bloom set in JS) */
+      --beam-core: rgba(255, 255, 255, 0.10);
+      --beam-fill: rgba(255, 255, 255, 0.15);
     }
 
     html,body{height:100%}
     body{
       margin:0; background:var(--bg); color:var(--ink);
-      font:14px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font:14px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
       overflow:hidden;
     }
     canvas{
       display:block; width:100vw; height:100vh; background:var(--bg);
       touch-action:none;
     }
-    /* HUD (top-left only) */
     .hud{
       position:fixed; z-index:2; color:var(--hud); letter-spacing:.08em; text-transform:uppercase;
       font-size:12px; opacity:.95; user-select:none; pointer-events:none;
-      mix-blend-mode:screen;
-      text-shadow: 0 0 6px rgba(97,239,255,.25);
+      mix-blend-mode:screen; text-shadow:0 0 6px rgba(97,239,255,.25);
     }
     .hud .k{ color:var(--dim); margin-right:.4rem }
     .hud .v{ color:var(--ink) }
@@ -50,36 +48,102 @@
   <script>
   'use strict';
 
-  // ===== Canvas & DPI-safe setup =====
+  // ===== Canvas + World/View (fixed world, scaled view) =====
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d', { alpha:false, desynchronized:true, antialias:true });
-  let W = 1280, H = 720, dpr = Math.max(1, window.devicePixelRatio || 1);
+
+  // World coordinates (physics space)
+  const WORLD = { w: 1280, h: 720 };
+  let W = WORLD.w, H = WORLD.h;
+
+  // View transform (world -> screen)
+  const VIEW = { scale: 1, ox: 0, oy: 0, dpr: 1 };
+
+  // Framing: ensure the red detection ring fits in the bottom-left quadrant
+  const FRAMING = {
+  mode: 'cover',
+  pad: 6,          // was 12 — smaller pad => larger scale while still in-frame
+  frac: 0.58       // NEW: portion of the screen used for the “quadrant” (0.5 = exact quadrant)
+};
+
+  function applyView(){
+    ctx.setTransform(
+      VIEW.dpr * VIEW.scale, 0,
+      0, VIEW.dpr * VIEW.scale,
+      VIEW.ox * VIEW.dpr, VIEW.oy * VIEW.dpr
+    );
+  }
+  function fullClear(){
+    ctx.save();
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.restore();
+  }
 
   function setSize(){
-    W = Math.max(320, Math.floor(window.innerWidth));
-    H = Math.max(320, Math.floor(window.innerHeight));
-    dpr = Math.max(1, window.devicePixelRatio || 1);
+    const sw = Math.max(320, Math.floor((window.visualViewport?.width  || window.innerWidth)));
+    const sh = Math.max(320, Math.floor((window.visualViewport?.height || window.innerHeight)));
+    VIEW.dpr = Math.max(1, window.devicePixelRatio || 1);
 
-    canvas.style.width = W + 'px';
-    canvas.style.height = H + 'px';
-    canvas.width = Math.round(W * dpr);
-    canvas.height = Math.round(H * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    tower.y = H - 160;
+    canvas.style.width  = sw + 'px';
+    canvas.style.height = sh + 'px';
+    canvas.width  = Math.round(sw * VIEW.dpr);
+    canvas.height = Math.round(sh * VIEW.dpr);
+
+    // Base scale from mode
+    const scaleCover   = Math.max(sw / WORLD.w, sh / WORLD.h);
+    const scaleContain = Math.min(sw / WORLD.w, sh / WORLD.h);
+    let scale = (FRAMING.mode === 'contain') ? scaleContain : scaleCover;
+
+    // --- Fit the detection circle entirely into the bottom-left quadrant ---
+    const pad = FRAMING.pad;
+    const frac = FRAMING.frac ?? 0.5;   // default stays 0.5 if you omit it
+    const quadW = sw * frac - pad*2;
+    const quadH = sh * frac - pad*2;
+    const rWorld = tower.r;
+    // Max scale so that 2*rWorld fits inside usable quad size
+    const fitScale = Math.max(0.001, Math.min(quadW / (2*rWorld), quadH / (2*rWorld)));
+    // Final scale: don't exceed fitScale
+    VIEW.scale = Math.min(scale, fitScale);
+
+    // Place the head so the circle sits snug inside the bottom-left quadrant with padding
+    const rPx = rWorld * VIEW.scale;
+    const sx = pad + rPx;            // target screen X for head (left inside quadrant)
+    const sy = sh - pad - rPx;       // target screen Y for head (bottom inside quadrant)
+
+    // Solve for view offsets (screen = ox + world*scale)
+    VIEW.ox = sx - tower.x * VIEW.scale;
+    VIEW.oy = sy - tower.y * VIEW.scale;
+
+    applyView();
   }
-  window.addEventListener('resize', setSize, { passive:true });
 
-  // ===== Tower & radar =====
+  // Visible world rectangle (what the screen shows, in world units)
+  function visibleWorldRect(){
+    const sw = canvas.width  / VIEW.dpr;
+    const sh = canvas.height / VIEW.dpr;
+    const vw = sw / VIEW.scale;
+    const vh = sh / VIEW.scale;
+    const x  = -VIEW.ox / VIEW.scale;
+    const y  = -VIEW.oy / VIEW.scale;
+    return { x, y, w: vw, h: vh };
+  }
+
+  window.addEventListener('resize', setSize, { passive:true });
+  window.visualViewport && window.visualViewport.addEventListener('resize', setSize, { passive:true });
+  window.addEventListener('orientationchange', setSize, { passive:true });
+
+  // ===== Tower & radar (world-space) =====
   const tower = { x: 170, y: H-160, r: 300, h: 160, sweep: 0, sweepSpeed: 1.18, span: Math.PI/18 };
-  const SHOW_TRACK_LINES = false;  // set true later if you want them back
+  const SHOW_TRACK_LINES = false;  // quick toggle for link lines
 
   // Entities
   const enemies = [];
   const defenders = [];
   const pops = [];
-  const DEFENDER_SPAWN_Y_OFFSET = -50; // negative lifts spawns up;
+  const DEFENDER_SPAWN_Y_OFFSET = -50;
 
-  // Stats / HUD
+  // HUD
   let KILLS = 0, lastFpsT = 0, fps = 0, fpsAccum = 0, fpsSamples = 0;
   const hudTL = document.getElementById('hudTL');
 
@@ -88,25 +152,31 @@
   const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
   const seek=(ax,ay,bx,by)=>{const dx=bx-ax,dy=by-ay;const d=Math.hypot(dx,dy)||1;return {x:dx/d,y:dy/d,d}};
   function radarHead(){ return { x: tower.x, y: tower.y - tower.h - 10 }; }
-  function getBeamDir(){ return tower.sweep + Math.PI/2; } // beam ⟂ to rod
+  function getBeamDir(){ return tower.sweep + Math.PI/2; }
   function getVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
   // ===== Spawning =====
   function spawnEnemy(){
-    const x = rand(0,W), y = -30 - rand(0, H*0.25);
+    // distribute across the *visible* width so items aren't off-camera on phones
+    const vr = visibleWorldRect();
+    const x = rand(vr.x, vr.x + vr.w);
+    const y = vr.y - 30 - rand(0, H*0.25); // a bit above visible top
     const base = 22 + rand(0,12);
     return { x,y, vx:0, vy:0, speed: base, maxSpeed: base*1.15, jitter: rand(0,1000), detected:false, locked:false, assigned:false, dead:false };
   }
   const PAD_OFFSETS = [ {dx:-60,dy:38},{dx:-30,dy:38},{dx:0,dy:38},{dx:30,dy:38},{dx:60,dy:38}, {dx:-45,dy:64},{dx:-15,dy:64},{dx:15,dy:64},{dx:45,dy:64} ];
   let padIndex=0;
   function defenderSpawnPoint(){
-  const o = PAD_OFFSETS[padIndex++ % PAD_OFFSETS.length];
-  return {
-    x: tower.x + o.dx + rand(-6, 6),
-    y: tower.y + o.dy + DEFENDER_SPAWN_Y_OFFSET + rand(-4, 4)
-  };
-}
-  function spawnDefender(target){ const p=defenderSpawnPoint(); defenders.push({ x:p.x, y:p.y, speed: 190, boost:1, target, dead:false }); }
+    const o = PAD_OFFSETS[padIndex++ % PAD_OFFSETS.length];
+    return {
+      x: tower.x + o.dx + rand(-6, 6),
+      y: tower.y + o.dy + DEFENDER_SPAWN_Y_OFFSET + rand(-4, 4)
+    };
+  }
+  function spawnDefender(target){
+    const p=defenderSpawnPoint();
+    defenders.push({ x:p.x, y:p.y, speed: 190, boost:1, target, dead:false });
+  }
 
   // ===== Simulation params =====
   const SEP_EN = 16, SEP_DEF = 16, SEP_CROSS = 10;
@@ -142,7 +212,7 @@
       const sp = clamp(e.speed, 10, e.maxSpeed);
       e.vx = vx * sp * dt; e.vy = vy * sp * dt; e.x += e.vx; e.y += e.vy;
 
-      // Detection by beam (⟂ to rod)
+      // Detection by beam
       const angTo = Math.atan2(e.y-head.y, e.x-head.x);
       const inBeam = Math.abs(((angTo - beamDir + Math.PI*3)%(Math.PI*2))-Math.PI) < tower.span;
       const distHead = Math.hypot(e.x-head.x, e.y-head.y);
@@ -160,7 +230,8 @@
         if(v.d < INSTANT_POP_DIST()){ pops.push({x:e.x,y:e.y,a:1}); best.dead=true; e.dead=true; KILLS++; }
       }
 
-      if(e.y > H + 140) e.dead = true;
+      const vr = visibleWorldRect();
+      if(e.y > (vr.y + vr.h) + 140) e.dead = true;
     }
 
     for(const d of defenders){
@@ -214,43 +285,40 @@
   }
 
   // ===== Drawing =====
+  function drawGrid(){
+    const head = radarHead();
+    const vr = visibleWorldRect();
 
-function drawGrid(){
-  const head = radarHead();              // center of fade
+    // 1) Cartesian grid across visible rect
+    ctx.save();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = getVar('--grid');
+    ctx.globalAlpha = 0.6;
+    const s = 32;
 
-  // 1) Draw the cartesian grid (uniform)
-  ctx.save();
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = getVar('--grid');
-  ctx.globalAlpha = 0.6;                // base grid strength
-  const s = 32;
+    const startX = Math.floor(vr.x / s) * s, endX = vr.x + vr.w;
+    for (let x = startX; x <= endX; x += s) {
+      ctx.beginPath(); ctx.moveTo(x, vr.y); ctx.lineTo(x, vr.y + vr.h); ctx.stroke();
+    }
+    const startY = Math.floor(vr.y / s) * s, endY = vr.y + vr.h;
+    for (let y = startY; y <= endY; y += s) {
+      ctx.beginPath(); ctx.moveTo(vr.x, y); ctx.lineTo(vr.x + vr.w, y); ctx.stroke();
+    }
 
-  for (let x = 0; x <= W; x += s) {
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    // 2) Radial fade mask over visible rect
+    const innerRadius = Math.max(80, Math.min(W, H) * 0.16);
+    const outerRadius = Math.max(W, H) * 0.65;
+    const g = ctx.createRadialGradient(head.x, head.y, innerRadius, head.x, head.y, outerRadius);
+    g.addColorStop(0.00, 'rgba(255,255,255,1)');
+    g.addColorStop(0.55, 'rgba(255,255,255,0.35)');
+    g.addColorStop(1.00, 'rgba(255,255,255,0)');
+
+    ctx.globalCompositeOperation = 'destination-in';
+    ctx.fillStyle = g;
+    ctx.fillRect(vr.x, vr.y, vr.w, vr.h);
+    ctx.restore();
   }
-  for (let y = 0; y <= H; y += s) {
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-  }
 
-  // 2) Radial fade mask (only affects what we've drawn so far = the grid)
-  const innerRadius = Math.max(80, Math.min(W, H) * 0.16);   // fully visible near head
-  const outerRadius = Math.max(W, H) * 0.65;                 // fades to 0 by here
-
-  const g = ctx.createRadialGradient(head.x, head.y, innerRadius,
-                                     head.x, head.y, outerRadius);
-  g.addColorStop(0.00, 'rgba(255,255,255,1)');
-  g.addColorStop(0.55, 'rgba(255,255,255,0.35)');
-  g.addColorStop(1.00, 'rgba(255,255,255,0)');
-
-  ctx.globalCompositeOperation = 'destination-in';
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, W, H);
-  ctx.restore();
-}
-  
-
-
-  // ===== Beam (symmetric trapezoid with soft gradient) =====
   function drawBeamFullBar(){
     const head = radarHead();
     const dir  = getBeamDir();
@@ -277,8 +345,8 @@ function drawGrid(){
       return { x: P.x + rx*t, y: P.y + ry*t };
     }
 
-    const D = rayCircle(A, vL); // top-left
-    const C = rayCircle(B, vR); // top-right
+    const D = rayCircle(A, vL);
+    const C = rayCircle(B, vR);
 
     let aL = Math.atan2(D.y - head.y, D.x - head.x);
     let aR = Math.atan2(C.y - head.y, C.x - head.x);
@@ -286,7 +354,6 @@ function drawGrid(){
     let delta = (aL - aR) % TWO_PI; if (delta < 0) delta += TWO_PI;
     const anticlockwise = delta > Math.PI;
 
-    // Gradient fill (radial from head)
     const g = ctx.createRadialGradient(head.x, head.y, 0, head.x, head.y, R);
     g.addColorStop(0.00, getVar('--beam-core'));
     g.addColorStop(0.25, getVar('--beam-fill'));
@@ -295,7 +362,7 @@ function drawGrid(){
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     ctx.shadowBlur = 18;
-    ctx.shadowColor = 'rgba(160, 255, 120, .22)';     // NVG green
+    ctx.shadowColor = 'rgba(160, 255, 120, .22)'; // NVG green bloom
     ctx.fillStyle = g;
 
     ctx.beginPath();
@@ -309,26 +376,20 @@ function drawGrid(){
     ctx.restore();
   }
 
-  // ===== Tower & visuals =====
   function drawTower(){
-    const x=tower.x, y=tower.y, h=tower.h; const head=radarHead();
+    const head=radarHead();
     ctx.save();
-
-    // Head rod
     ctx.save();
     ctx.lineWidth=2; ctx.strokeStyle='rgba(255,255,255,.95)'; ctx.shadowBlur=12; ctx.shadowColor='rgba(255,255,255,.35)';
-  
     ctx.translate(head.x, head.y);
     ctx.rotate(tower.sweep);
     ctx.beginPath(); ctx.moveTo(-30,0); ctx.lineTo(30,0); ctx.stroke();
     ctx.restore();
 
-    // Head crosshair
     ctx.strokeStyle='rgba(255,255,255,.65)'; ctx.lineWidth=1;
     ctx.beginPath(); ctx.arc(head.x, head.y, 12, 0, Math.PI*2); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(head.x-18, head.y); ctx.lineTo(head.x+18, head.y);
     ctx.moveTo(head.x, head.y-18); ctx.lineTo(head.x, head.y+18); ctx.stroke();
-
     ctx.restore();
   }
 
@@ -350,8 +411,6 @@ function drawGrid(){
     ctx.lineWidth=1.4;
     ctx.shadowBlur = 8;
     ctx.shadowColor = color + '55';
-
-    // enemy: downward triangle
     const s=8;
     ctx.beginPath();
     ctx.moveTo(0, s);
@@ -359,10 +418,8 @@ function drawGrid(){
     ctx.lineTo(s, -s);
     ctx.closePath();
     ctx.stroke();
-
     ctx.restore();
   }
-
   function drawFriendlyChevron(x,y,color){
     ctx.save();
     ctx.translate(x,y);
@@ -370,63 +427,48 @@ function drawGrid(){
     ctx.lineWidth=1.4;
     ctx.shadowBlur = 8;
     ctx.shadowColor = color + '55';
-
     const s=9;
     ctx.beginPath();
     ctx.moveTo(-s, -s*0.4);
     ctx.lineTo(0, s*0.8);
     ctx.lineTo(s, -s*0.4);
     ctx.stroke();
-
     ctx.restore();
   }
-
-  // NEW: lock bracket drawn only when detected; white outside ring, red inside
   function drawLockBracket(x,y,color){
     ctx.save();
     ctx.translate(x,y);
     ctx.shadowBlur = 0;
     ctx.strokeStyle = color;
     ctx.lineWidth = 1;
-
     ctx.beginPath();
-    // TL
     ctx.moveTo(-10,-12); ctx.lineTo(-16,-12); ctx.lineTo(-16,-6);
-    // TR
     ctx.moveTo(10,-12);  ctx.lineTo(16,-12);  ctx.lineTo(16,-6);
-    // BL
     ctx.moveTo(-10,12);  ctx.lineTo(-16,12);  ctx.lineTo(-16,6);
-    // BR
     ctx.moveTo(10,12);   ctx.lineTo(16,12);   ctx.lineTo(16,6);
     ctx.stroke();
-
     ctx.restore();
   }
 
   function drawDrones(){
-  const head = radarHead();
+    const head = radarHead();
 
-  // Links from head to detected targets (white outside ring, red inside)
-  if (SHOW_TRACK_LINES) {
-    for (const e of enemies) {
-      if (e.dead || !e.detected) continue;
-      const distHead = Math.hypot(e.x - head.x, e.y - head.y);
-      const col = (distHead <= tower.r) ? getVar('--locked') : '#ffffff';
-      ctx.strokeStyle = col; ctx.lineWidth = 0.8; ctx.globalAlpha = 0.9;
-      ctx.beginPath(); ctx.moveTo(head.x, head.y); ctx.lineTo(e.x, e.y); ctx.stroke();
+    if (SHOW_TRACK_LINES) {
+      for (const e of enemies) {
+        if (e.dead || !e.detected) continue;
+        const distHead = Math.hypot(e.x - head.x, e.y - head.y);
+        const col = (distHead <= tower.r) ? getVar('--locked') : '#ffffff';
+        ctx.strokeStyle = col; ctx.lineWidth = 0.8; ctx.globalAlpha = 0.9;
+        ctx.beginPath(); ctx.moveTo(head.x, head.y); ctx.lineTo(e.x, e.y); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
     }
-    ctx.globalAlpha = 1;
-  }
 
-
-    // Enemy / Defender symbols
     for(const e of enemies){
       if(e.dead) continue;
-      // Enemy triangle color can still reflect "locked" state (red once inside ring)
       const triColor = e.locked ? getVar('--locked') : '#ffffff';
       drawEnemyTriangle(e.x, e.y, triColor);
 
-      // Lock brackets ONLY when detected; white outside ring, red inside ring
       if(e.detected){
         const distHead=Math.hypot(e.x-head.x, e.y-head.y);
         const bracketColor = (distHead<=tower.r) ? getVar('--locked') : '#ffffff';
@@ -452,29 +494,33 @@ function drawGrid(){
   }
 
   function drawScanlines(){
+    const vr = visibleWorldRect();
     ctx.save();
     ctx.globalAlpha = 0.06;
-    for(let y=0; y<H; y+=2){
+    for(let y=Math.floor(vr.y); y<=vr.y+vr.h; y+=2){
       ctx.fillStyle = '#000';
-      ctx.fillRect(0,y,W,1);
+      ctx.fillRect(vr.x, y, vr.w, 1);
     }
     ctx.restore();
   }
 
   function drawVignette(){
-    const g = ctx.createRadialGradient(W*0.5, H*0.5, Math.min(W,H)*0.2, W*0.5, H*0.5, Math.max(W,H)*0.7);
+    const vr = visibleWorldRect();
+    const g = ctx.createRadialGradient(
+      W*0.5, H*0.5, Math.min(W,H)*0.2,
+      W*0.5, H*0.5, Math.max(W,H)*0.7
+    );
     g.addColorStop(0, 'rgba(0,0,0,0)');
     g.addColorStop(1, 'rgba(0,0,0,0.5)');
     ctx.save();
     ctx.fillStyle = g;
-    ctx.fillRect(0,0,W,H);
+    ctx.fillRect(vr.x, vr.y, vr.w, vr.h);
     ctx.restore();
   }
 
   function draw(){
-    ctx.clearRect(0,0,W,H);
-
-  
+    fullClear();        // clear entire physical canvas
+    applyView();        // re-apply view transform after clear
 
     // Background layers
     drawGrid();
@@ -485,7 +531,7 @@ function drawGrid(){
     drawDrones();
     drawPops();
 
-    // Foreground: Tower + FX
+    // Foreground
     drawTower();
 
     // Screen treatments
@@ -493,11 +539,11 @@ function drawGrid(){
     drawVignette();
   }
 
-  // ===== HUD updater (top-left only) =====
+  // ===== HUD =====
   let hudTimer = 0;
   function updateHUD(dt){
     hudTimer += dt;
-    if(hudTimer < 0.25) return; // reduce DOM churn
+    if(hudTimer < 0.25) return;
     hudTimer = 0;
 
     const tracks = enemies.reduce((n, e) => n + (e.detected ? 1 : 0), 0);
@@ -512,7 +558,7 @@ function drawGrid(){
     `;
   }
 
-  // ===== Lightweight runtime tests =====
+  // ===== Tests =====
   function runTests(){
     const diff = ((getBeamDir() - (tower.sweep + Math.PI/2) + Math.PI*3)%(Math.PI*2))-Math.PI;
     console.assert(Math.abs(diff) < 1e-6, 'Beam not perpendicular to rod');
@@ -524,7 +570,6 @@ function drawGrid(){
   function loop(nowMs){
     const now = nowMs || performance.now();
     const dt = Math.min(0.05, (now-last)/1000 || 0.016);
-    // FPS (for internal smoothing only)
     fpsAccum += 1/dt; fpsSamples++;
     if(!lastFpsT) lastFpsT = now;
     if(now - lastFpsT > 500){ fps = Math.max(1, Math.round(fpsAccum / fpsSamples)); fpsAccum = 0; fpsSamples = 0; lastFpsT = now; }
