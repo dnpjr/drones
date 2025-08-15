@@ -62,12 +62,12 @@
 
   // Framing: ensure the red detection ring fits in the bottom-left quadrant
   const FRAMING = {
-  mode: 'cover',
-  pad: 1,          // used for FIT (scaling the scene)
-  frac: 0.6,       // portion of screen reserved for the circle (0.5 = quadrant)
-  // Placement pad (equal distance from LEFT and BOTTOM in screen px or %):
-  posPadPct: 0.02 // or use % of the shorter screen side instead of px
-};
+    mode: 'cover',
+    pad: 1,          // used for FIT (scaling the scene)
+    frac: 0.6,       // portion of screen reserved for the circle (0.5 = quadrant)
+    // Placement pad (equal distance from LEFT and BOTTOM in screen px or %):
+    posPadPct: 0.02 // or use % of the shorter screen side instead of px
+  };
 
   function applyView(){
     ctx.setTransform(
@@ -94,49 +94,46 @@
     canvas.height = Math.round(sh * VIEW.dpr);
 
     // Base scale from mode
-const scaleCover   = Math.max(sw / WORLD.w, sh / WORLD.h);
-const scaleContain = Math.min(sw / WORLD.w, sh / WORLD.h);
-let baseScale = (FRAMING.mode === 'contain') ? scaleContain : scaleCover;
+    const scaleCover   = Math.max(sw / WORLD.w, sh / WORLD.h);
+    const scaleContain = Math.min(sw / WORLD.w, sh / WORLD.h);
+    let baseScale = (FRAMING.mode === 'contain') ? scaleContain : scaleCover;
 
-// --- FIT: guarantee the red ring fits in a fraction of the screen with fitPad ---
-const fitPad = FRAMING.pad;                   // used only for fit
-const frac   = FRAMING.frac ?? 0.5;
-const usableW = sw * frac - fitPad * 2;
-const usableH = sh * frac - fitPad * 2;
-const rWorld  = tower.r;
-const fitScale = Math.max(0.001, Math.min(usableW / (2 * rWorld), usableH / (2 * rWorld)));
+    // --- FIT: guarantee the red ring fits in a fraction of the screen with fitPad ---
+    const fitPad = FRAMING.pad;                   // used only for fit
+    const frac   = FRAMING.frac ?? 0.5;
+    const usableW = sw * frac - fitPad * 2;
+    const usableH = sh * frac - fitPad * 2;
+    const rWorld  = tower.r;
+    const fitScale = Math.max(0.001, Math.min(usableW / (2 * rWorld), usableH / (2 * rWorld)));
 
-// Final scale: don’t exceed the fit limit
-VIEW.scale = Math.min(baseScale, fitScale);
+    // Final scale: don’t exceed the fit limit
+    VIEW.scale = Math.min(baseScale, fitScale);
 
-// --- Speed scale: faster when the circle is small vs screen height ---
-const limiting = Math.min(usableW, usableH);      // actual circle diameter in px is limiting
-// baseline ~1 in landscape when height limits the circle; grows on tall/portrait screens
-SPEED_SCALE = clamp((sh / limiting) * frac, 0.9, 3.5);  // tweak clamps if you like
+    // --- Speed scale: faster when the circle is small vs screen height ---
+    const limiting = Math.min(usableW, usableH);      // actual circle diameter in px is limiting
+    SPEED_SCALE = clamp((sh / limiting) * frac, 0.9, 3.5);
 
-// ---- after you compute VIEW.scale and have sw/sh ----
+    // circle radius in pixels at this scale
+    const rPx = tower.r * VIEW.scale;
 
-// circle radius in pixels at this scale
-const rPx = tower.r * VIEW.scale;
+    // desired equal pad (choose px or %)
+    let posPad = (typeof FRAMING.posPadPx === 'number')
+      ? FRAMING.posPadPx
+      : Math.round((FRAMING.posPadPct ?? 0) * Math.min(sw, sh));
 
-// desired equal pad (choose px or %)
-let posPad = (typeof FRAMING.posPadPx === 'number')
-  ? FRAMING.posPadPx
-  : Math.round((FRAMING.posPadPct ?? 0) * Math.min(sw, sh));
+    // clamp so the circle never clips top/right
+    const posPadMax = Math.max(0, Math.min(sw - 2*rPx, sh - 2*rPx));
+    posPad = Math.max(0, Math.min(posPad, posPadMax));
 
-// clamp so the circle never clips top/right
-const posPadMax = Math.max(0, Math.min(sw - 2*rPx, sh - 2*rPx));
-posPad = Math.max(0, Math.min(posPad, posPadMax));
+    // equal margins: left distance = bottom distance = posPad
+    const sx = posPad + rPx;           // center X on screen
+    const sy = sh - posPad - rPx;      // center Y on screen
 
-// equal margins: left distance = bottom distance = posPad
-const sx = posPad + rPx;           // center X on screen
-const sy = sh - posPad - rPx;      // center Y on screen
+    // solve view offsets (screen = ox + world*scale)
+    VIEW.ox = sx - tower.x * VIEW.scale;
+    VIEW.oy = sy - tower.y * VIEW.scale;
 
-// solve view offsets (screen = ox + world*scale)
-VIEW.ox = sx - tower.x * VIEW.scale;
-VIEW.oy = sy - tower.y * VIEW.scale;
-
-applyView();
+    applyView();
   }
 
   // Visible world rectangle (what the screen shows, in world units)
@@ -164,6 +161,42 @@ applyView();
   const pops = [];
   const DEFENDER_SPAWN_Y_OFFSET = -50;
 
+  // --- Ownership and retask helpers (1 defender per enemy) ---
+  let DEFENDER_SEQ = 1;
+
+  function getDefenderById(id){
+    for (const d of defenders) if (!d.dead && d.id === id) return d;
+    return null;
+  }
+  function releaseTarget(enemy){
+    if (enemy) enemy.ownerId = null;
+  }
+  function acquireTarget(def, enemy){
+    if (!def || !enemy || def.dead || enemy.dead) return false;
+    if (enemy.ownerId && enemy.ownerId !== def.id) return false; // already owned
+    enemy.ownerId = def.id;
+    def.target = enemy;
+    return true;
+  }
+  function findNearestUnownedEnemy(x, y){
+    let best=null, bd=1e9;
+    for (const e of enemies){
+      if (e.dead) continue;
+      if (e.ownerId) continue;
+      const dx=e.x-x, dy=e.y-y, dd=dx*dx+dy*dy;
+      if (dd<bd){ bd=dd; best=e; }
+    }
+    return best;
+  }
+  function retaskOrDespawn(def){
+    const e = findNearestUnownedEnemy(def.x, def.y);
+    if (e && acquireTarget(def, e)){
+      def.boost = Math.max(1, 2.0);
+    } else {
+      def.dead = true; // no work -> despawn
+    }
+  }
+
   // HUD
   let KILLS = 0, lastFpsT = 0, fps = 0, fpsAccum = 0, fpsSamples = 0;
   const hudTL = document.getElementById('hudTL');
@@ -183,7 +216,13 @@ applyView();
     const x = rand(vr.x, vr.x + vr.w);
     const y = vr.y - 30 - rand(0, H*0.25); // a bit above visible top
     const base = (22 + rand(0,12)) * SPEED_SCALE;
-    return { x,y, vx:0, vy:0, speed: base, maxSpeed: base*1.15, jitter: rand(0,1000), detected:false, locked:false, assigned:false, dead:false };
+    return {
+      x,y, vx:0, vy:0,
+      speed: base, maxSpeed: base*1.15, jitter: rand(0,1000),
+      detected:false, locked:false, assigned:false, dead:false,
+      ownerId:null,       // <-- NEW: owned by a single defender
+      killClaimed:false   // <-- NEW: ensures atomic kill on collision
+    };
   }
   const PAD_OFFSETS = [ {dx:-60,dy:38},{dx:-30,dy:38},{dx:0,dy:38},{dx:30,dy:38},{dx:60,dy:38}, {dx:-45,dy:64},{dx:-15,dy:64},{dx:15,dy:64},{dx:45,dy:64} ];
   let padIndex=0;
@@ -195,8 +234,10 @@ applyView();
     };
   }
   function spawnDefender(target){
-    const p=defenderSpawnPoint();
-    defenders.push({ x:p.x, y:p.y, speed: 190 * SPEED_SCALE * 1.1, boost:1, target, dead:false });
+    const p = defenderSpawnPoint();
+    const def = { id: DEFENDER_SEQ++, x:p.x, y:p.y, speed: 190 * SPEED_SCALE * 1.1, boost:1, target:null, dead:false };
+    defenders.push(def);
+    acquireTarget(def, target); // 1:1 ownership
   }
 
   // ===== Simulation params =====
@@ -215,6 +256,7 @@ applyView();
     const head = radarHead();
     const beamDir = getBeamDir();
 
+    // --- ENEMIES ---
     for(const e of enemies){
       if(e.dead) continue;
       e.jitter += dt*0.6;
@@ -242,36 +284,94 @@ applyView();
 
       if(!e.locked && e.detected && distHead <= tower.r){ e.locked = true; }
 
-      if(e.locked && distHead < FORCE_INTERCEPT_DIST()){
-        let best=null, bd=1e9;
-        for(const d of defenders){ if(d.dead) continue; const dx=d.x-e.x, dy=d.y-e.y; const dd=dx*dx+dy*dy; if(dd<bd){bd=dd; best=d;} }
-        if(!best){ spawnDefender(e); best = defenders[defenders.length-1]; }
-        best.target=e; best.boost = Math.max(best.boost||1, 2.2);
-        const v = seek(best.x,best.y,e.x,e.y);
-        if(v.d < INSTANT_POP_DIST()){ pops.push({x:e.x,y:e.y,a:1}); best.dead=true; e.dead=true; KILLS++; }
+      // Task ONE defender (owner) when inside forced intercept distance
+      if (e.locked && distHead < FORCE_INTERCEPT_DIST()){
+        // If already owned and owner alive, just boost owner
+        let owner = e.ownerId ? getDefenderById(e.ownerId) : null;
+
+        if (!owner){
+          // Try to find a free defender (no current target)
+          let free=null, bd=1e9;
+          for(const d of defenders){
+            if (d.dead) continue;
+            if (d.target) continue;
+            const dx=d.x-e.x, dy=d.y-e.y, dd=dx*dx+dy*dy;
+            if (dd<bd){ bd=dd; free=d; }
+          }
+          if (free){
+            acquireTarget(free, e);
+            owner = free;
+          } else {
+            // No free defender → spawn exactly one and own it
+            spawnDefender(e);
+            owner = defenders[defenders.length-1];
+          }
+        }
+
+        if (owner){
+          owner.boost = Math.max(owner.boost||1, 2.2);
+        }
       }
 
       const vr = visibleWorldRect();
       if(e.y > (vr.y + vr.h) + 140) e.dead = true;
     }
 
-    for(const d of defenders){
-      if(d.dead || !d.target || d.target.dead){ d.dead=true; continue; }
-      d.speed = d.target.speed; d.boost = Math.max(1, d.boost||1);
-      const v=seek(d.x,d.y,d.target.x,d.target.y);
-      d.x += v.x*d.speed*d.boost*dt; d.y += v.y*d.speed*d.boost*dt;
-      if(v.d<11){ pops.push({x:d.target.x,y:d.target.y,a:1}); d.dead=true; if(!d.target.dead){ d.target.dead=true; KILLS++; } }
+    // --- DEFENDERS ---
+    for (const d of defenders){
+      if (d.dead) continue;
+
+      // No target or target already gone? Retask instead of dying
+      if (!d.target || d.target.dead){
+        if (d.target) releaseTarget(d.target);
+        d.target = null;
+        retaskOrDespawn(d);
+        continue;
+      }
+
+      // Match target speed; apply boost
+      d.speed = d.target.speed;
+      d.boost = Math.max(1, d.boost||1);
+
+      // Seek target
+      const v = seek(d.x, d.y, d.target.x, d.target.y);
+      d.x += v.x * d.speed * d.boost * dt;
+      d.y += v.y * d.speed * d.boost * dt;
+
+      // Interception radius (atomic, 1:1)
+      if (v.d < 11){
+        if (!d.target.killClaimed && !d.target.dead){
+          d.target.killClaimed = true;
+          d.target.dead = true;      // enemy dies
+          releaseTarget(d.target);
+          pops.push({ x:d.target.x, y:d.target.y, a:1 });
+          KILLS++;
+          d.dead = true;             // owner defender sacrifices on hit
+        } else {
+          // Someone else already killed this target → retask immediately
+          d.target = null;
+          retaskOrDespawn(d);
+        }
+        continue;
+      }
+
+      // bleed off boost
       d.boost = Math.max(1, d.boost - dt*0.8);
     }
 
+    // Separation
     separatePairs(enemies, SEP_EN);
     separatePairs(defenders, SEP_DEF);
     separateCross(enemies, defenders, SEP_CROSS);
 
+    // Pop fades
     for(const p of pops){ p.a -= dt*5.5; }
 
     // cleanup
-    for(let i=enemies.length-1;i>=0;i--) if(enemies[i].dead) enemies.splice(i,1);
+    for(let i=enemies.length-1;i>=0;i--){
+      const e = enemies[i];
+      if(e.dead){ releaseTarget(e); enemies.splice(i,1); }
+    }
     for(let i=defenders.length-1;i>=0;i--) if(defenders[i].dead) defenders.splice(i,1);
     for(let i=pops.length-1;i>=0;i--) if(pops[i].a<=0) pops.splice(i,1);
   }
