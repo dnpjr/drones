@@ -51,6 +51,7 @@
   // ===== Canvas + World/View (fixed world, scaled view) =====
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d', { alpha:false, desynchronized:true, antialias:true });
+  let SPEED_SCALE = 1.5;
 
   // World coordinates (physics space)
   const WORLD = { w: 1280, h: 720 };
@@ -108,6 +109,11 @@ const fitScale = Math.max(0.001, Math.min(usableW / (2 * rWorld), usableH / (2 *
 // Final scale: don’t exceed the fit limit
 VIEW.scale = Math.min(baseScale, fitScale);
 
+// --- Speed scale: faster when the circle is small vs screen height ---
+const limiting = Math.min(usableW, usableH);      // actual circle diameter in px is limiting
+// baseline ~1 in landscape when height limits the circle; grows on tall/portrait screens
+SPEED_SCALE = clamp((sh / limiting) * frac, 0.9, 3.5);  // tweak clamps if you like
+
 // ---- after you compute VIEW.scale and have sw/sh ----
 
 // circle radius in pixels at this scale
@@ -149,7 +155,7 @@ applyView();
   window.addEventListener('orientationchange', setSize, { passive:true });
 
   // ===== Tower & radar (world-space) =====
-  const tower = { x: 170, y: H-160, r: 300, h: 160, sweep: 0, sweepSpeed: 1.18, span: Math.PI/18 };
+  const tower = { x: 170, y: H-160, r: 300, h: 160, sweep: 0, sweepSpeed: 1.18*SPEED_SCALE, span: Math.PI/18 };
   const SHOW_TRACK_LINES = false;  // quick toggle for link lines
 
   // Entities
@@ -176,7 +182,7 @@ applyView();
     const vr = visibleWorldRect();
     const x = rand(vr.x, vr.x + vr.w);
     const y = vr.y - 30 - rand(0, H*0.25); // a bit above visible top
-    const base = 22 + rand(0,12);
+    const base = (22 + rand(0,12)) * SPEED_SCALE;
     return { x,y, vx:0, vy:0, speed: base, maxSpeed: base*1.15, jitter: rand(0,1000), detected:false, locked:false, assigned:false, dead:false };
   }
   const PAD_OFFSETS = [ {dx:-60,dy:38},{dx:-30,dy:38},{dx:0,dy:38},{dx:30,dy:38},{dx:60,dy:38}, {dx:-45,dy:64},{dx:-15,dy:64},{dx:15,dy:64},{dx:45,dy:64} ];
@@ -190,7 +196,7 @@ applyView();
   }
   function spawnDefender(target){
     const p=defenderSpawnPoint();
-    defenders.push({ x:p.x, y:p.y, speed: 190, boost:1, target, dead:false });
+    defenders.push({ x:p.x, y:p.y, speed: 190 * SPEED_SCALE, boost:1, target, dead:false });
   }
 
   // ===== Simulation params =====
