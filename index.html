@@ -2,34 +2,86 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Drone Swarm Radar — Single-file Html App (v20)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Drone Swarm Radar — Ops Console</title>
   <style>
-    :root{ --bg:#000; --ink:#fff; --locked:#ff4d4d; --defender:#4ea3ff; }
+    :root{
+      /* Palette */
+      --bg:#070b12;              /* night-ops background */
+      --ink:#ffffff;             /* primary ink */
+      --hud:#9de1ff;             /* HUD accents */
+      --locked:#ff5b5b;          /* hostile/lock */
+      --defender:#31c9ff;        /* friendly */
+      --accent:#00ffd5;          /* highlights */
+      --dim:#6c8793;             /* subdued text */
+      --grid:#343434;            /* cartesian grid */
+
+      /* Beam tuning */
+      --beam-core: rgba(255, 255, 255, 0.1);  
+      --beam-fill: rgba(255, 255, 255, 0.15);   
+    }
+
     html,body{height:100%}
-    body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial;overflow:hidden}
-    canvas{display:block;width:100%;height:100%;background:var(--bg)}
-    .note{position:fixed;left:10px;top:10px;color:#bbb;font-size:12px;opacity:.85}
+    body{
+      margin:0; background:var(--bg); color:var(--ink);
+      font:14px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      overflow:hidden;
+    }
+    canvas{
+      display:block; width:100vw; height:100vh; background:var(--bg);
+      touch-action:none;
+    }
+    /* HUD (top-left only) */
+    .hud{
+      position:fixed; z-index:2; color:var(--hud); letter-spacing:.08em; text-transform:uppercase;
+      font-size:12px; opacity:.95; user-select:none; pointer-events:none;
+      mix-blend-mode:screen;
+      text-shadow: 0 0 6px rgba(97,239,255,.25);
+    }
+    .hud .k{ color:var(--dim); margin-right:.4rem }
+    .hud .v{ color:var(--ink) }
+    .hud-tl{ left:12px; top:12px }
   </style>
 </head>
 <body>
   <canvas id="c"></canvas>
+  <div class="hud hud-tl" id="hudTL"></div>
 
   <script>
   'use strict';
-  // ===== Canvas & safe defaults =====
+
+  // ===== Canvas & DPI-safe setup =====
   const canvas = document.getElementById('c');
-  const ctx = canvas.getContext('2d');
-  let W = window.innerWidth  || 1280;
-  let H = window.innerHeight || 720;
+  const ctx = canvas.getContext('2d', { alpha:false, desynchronized:true, antialias:true });
+  let W = 1280, H = 720, dpr = Math.max(1, window.devicePixelRatio || 1);
+
+  function setSize(){
+    W = Math.max(320, Math.floor(window.innerWidth));
+    H = Math.max(320, Math.floor(window.innerHeight));
+    dpr = Math.max(1, window.devicePixelRatio || 1);
+
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    tower.y = H - 160;
+  }
+  window.addEventListener('resize', setSize, { passive:true });
 
   // ===== Tower & radar =====
-  const tower = { x: 170, y: H-160, r: 280, h: 160, sweep: 0, sweepSpeed: 1.2, span: Math.PI/18 };
+  const tower = { x: 170, y: H-160, r: 300, h: 160, sweep: 0, sweepSpeed: 1.18, span: Math.PI/18 };
+  const SHOW_TRACK_LINES = false;  // set true later if you want them back
 
   // Entities
   const enemies = [];
   const defenders = [];
   const pops = [];
+  const DEFENDER_SPAWN_Y_OFFSET = -50; // negative lifts spawns up;
+
+  // Stats / HUD
+  let KILLS = 0, lastFpsT = 0, fps = 0, fpsAccum = 0, fpsSamples = 0;
+  const hudTL = document.getElementById('hudTL');
 
   // ===== Helpers =====
   const rand=(a=0,b=1)=>a+Math.random()*(b-a);
@@ -37,18 +89,23 @@
   const seek=(ax,ay,bx,by)=>{const dx=bx-ax,dy=by-ay;const d=Math.hypot(dx,dy)||1;return {x:dx/d,y:dy/d,d}};
   function radarHead(){ return { x: tower.x, y: tower.y - tower.h - 10 }; }
   function getBeamDir(){ return tower.sweep + Math.PI/2; } // beam ⟂ to rod
-  function resize(){ W=canvas.width=window.innerWidth; H=canvas.height=window.innerHeight; tower.y=H-160; }
-  window.addEventListener('resize', resize);
+  function getVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
   // ===== Spawning =====
   function spawnEnemy(){
-    const x = rand(0,W); const y = -30 - rand(0, H*0.25);
+    const x = rand(0,W), y = -30 - rand(0, H*0.25);
     const base = 22 + rand(0,12);
     return { x,y, vx:0, vy:0, speed: base, maxSpeed: base*1.15, jitter: rand(0,1000), detected:false, locked:false, assigned:false, dead:false };
   }
   const PAD_OFFSETS = [ {dx:-60,dy:38},{dx:-30,dy:38},{dx:0,dy:38},{dx:30,dy:38},{dx:60,dy:38}, {dx:-45,dy:64},{dx:-15,dy:64},{dx:15,dy:64},{dx:45,dy:64} ];
   let padIndex=0;
-  function defenderSpawnPoint(){ const o=PAD_OFFSETS[padIndex++ % PAD_OFFSETS.length]; return { x:tower.x+o.dx+rand(-6,6), y:tower.y+o.dy+rand(-4,4) }; }
+  function defenderSpawnPoint(){
+  const o = PAD_OFFSETS[padIndex++ % PAD_OFFSETS.length];
+  return {
+    x: tower.x + o.dx + rand(-6, 6),
+    y: tower.y + o.dy + DEFENDER_SPAWN_Y_OFFSET + rand(-4, 4)
+  };
+}
   function spawnDefender(target){ const p=defenderSpawnPoint(); defenders.push({ x:p.x, y:p.y, speed: 190, boost:1, target, dead:false }); }
 
   // ===== Simulation params =====
@@ -57,12 +114,12 @@
   const FORCE_INTERCEPT_DIST = () => Math.max(34, tower.r*0.35);
   const INSTANT_POP_DIST    = () => Math.max(14, tower.r*0.12);
 
-  // ===== Sim loop state =====
+  // ===== Sim loop =====
   let paused=false, last=0;
 
   function step(dt){
     tower.sweep = (tower.sweep + tower.sweepSpeed*dt) % (Math.PI*2);
-    if(enemies.length < 22 && Math.random() < 0.026) enemies.push(spawnEnemy());
+    if(enemies.length < 24 && Math.random() < 0.026) enemies.push(spawnEnemy());
 
     const head = radarHead();
     const beamDir = getBeamDir();
@@ -75,7 +132,11 @@
       let vx = Math.cos(Math.atan2(to.y,to.x)+wanderAng)*0.5;
       let vy = Math.sin(Math.atan2(to.y,to.x)+wanderAng)*0.5;
 
-      for(const o of enemies){ if(o===e||o.dead) continue; const dx=e.x-o.x, dy=e.y-o.y; const d=Math.hypot(dx,dy); if(d>0 && d<SEP_EN){ vx += (dx/d)*(SEP_EN-d)*0.02; vy += (dy/d)*(SEP_EN-d)*0.02; } }
+      for(const o of enemies){
+        if(o===e||o.dead) continue;
+        const dx=e.x-o.x, dy=e.y-o.y; const d=Math.hypot(dx,dy);
+        if(d>0 && d<SEP_EN){ const push=(SEP_EN-d)*0.02; vx += (dx/d)*push; vy += (dy/d)*push; }
+      }
 
       const mag=Math.hypot(vx,vy)||1; vx/=mag; vy/=mag;
       const sp = clamp(e.speed, 10, e.maxSpeed);
@@ -91,10 +152,12 @@
       if(!e.locked && e.detected && distHead <= tower.r){ e.locked = true; }
 
       if(e.locked && distHead < FORCE_INTERCEPT_DIST()){
-        let best=null, bd=1e9; for(const d of defenders){ if(d.dead) continue; const dx=d.x-e.x, dy=d.y-e.y; const dd=dx*dx+dy*dy; if(dd<bd){bd=dd; best=d;} }
+        let best=null, bd=1e9;
+        for(const d of defenders){ if(d.dead) continue; const dx=d.x-e.x, dy=d.y-e.y; const dd=dx*dx+dy*dy; if(dd<bd){bd=dd; best=d;} }
         if(!best){ spawnDefender(e); best = defenders[defenders.length-1]; }
         best.target=e; best.boost = Math.max(best.boost||1, 2.2);
-        const v = seek(best.x,best.y,e.x,e.y); if(v.d < INSTANT_POP_DIST()){ pops.push({x:e.x,y:e.y,a:1}); best.dead=true; e.dead=true; }
+        const v = seek(best.x,best.y,e.x,e.y);
+        if(v.d < INSTANT_POP_DIST()){ pops.push({x:e.x,y:e.y,a:1}); best.dead=true; e.dead=true; KILLS++; }
       }
 
       if(e.y > H + 140) e.dead = true;
@@ -103,7 +166,9 @@
     for(const d of defenders){
       if(d.dead || !d.target || d.target.dead){ d.dead=true; continue; }
       d.speed = d.target.speed; d.boost = Math.max(1, d.boost||1);
-      const v=seek(d.x,d.y,d.target.x,d.target.y); d.x += v.x*d.speed*d.boost*dt; d.y += v.y*d.speed*d.boost*dt; if(v.d<11){ pops.push({x:d.target.x,y:d.target.y,a:1}); d.dead=true; d.target.dead=true; }
+      const v=seek(d.x,d.y,d.target.x,d.target.y);
+      d.x += v.x*d.speed*d.boost*dt; d.y += v.y*d.speed*d.boost*dt;
+      if(v.d<11){ pops.push({x:d.target.x,y:d.target.y,a:1}); d.dead=true; if(!d.target.dead){ d.target.dead=true; KILLS++; } }
       d.boost = Math.max(1, d.boost - dt*0.8);
     }
 
@@ -111,8 +176,9 @@
     separatePairs(defenders, SEP_DEF);
     separateCross(enemies, defenders, SEP_CROSS);
 
-    for(const p of pops){ p.a -= dt*6; }
+    for(const p of pops){ p.a -= dt*5.5; }
 
+    // cleanup
     for(let i=enemies.length-1;i>=0;i--) if(enemies[i].dead) enemies.splice(i,1);
     for(let i=defenders.length-1;i>=0;i--) if(defenders[i].dead) defenders.splice(i,1);
     for(let i=pops.length-1;i>=0;i--) if(pops[i].a<=0) pops.splice(i,1);
@@ -125,149 +191,360 @@
       for(let j=i+1;j<list.length;j++){
         const b=list[j]; if(!b || b.dead) continue;
         const dx=b.x-a.x, dy=b.y-a.y; const d=Math.hypot(dx,dy);
-        if(d>0 && d<minDist){ const push=(minDist-d)/2; const nx=dx/d, ny=dy/d; a.x -= nx*push; a.y -= ny*push; b.x += nx*push; b.y += ny*push; }
+        if(d>0 && d<minDist){
+          const push=(minDist-d)/2; const nx=dx/d, ny=dy/d;
+          a.x -= nx*push; a.y -= ny*push; b.x += nx*push; b.y += ny*push;
+        }
       }
     }
   }
   function separateCross(A,B,minDist){
-    for(const a of A){ if(a.dead) continue; for(const b of B){ if(b.dead) continue; if(b.target===a) continue; const dx=b.x-a.x, dy=b.y-a.y; const d=Math.hypot(dx,dy); if(d>0 && d<minDist){ const push=(minDist-d)/2; const nx=dx/d, ny=dy/d; a.x -= nx*push; a.y -= ny*push; b.x += nx*push; b.y += ny*push; } }}
+    for(const a of A){
+      if(a.dead) continue;
+      for(const b of B){
+        if(b.dead) continue;
+        if(b.target===a) continue;
+        const dx=b.x-a.x, dy=b.y-a.y; const d=Math.hypot(dx,dy);
+        if(d>0 && d<minDist){
+          const push=(minDist-d)/2; const nx=dx/d, ny=dy/d;
+          a.x -= nx*push; a.y -= ny*push; b.x += nx*push; b.y += ny*push;
+        }
+      }
+    }
   }
 
   // ===== Drawing =====
-  function drawDroneProfile(x,y,color,size=9){
-    ctx.save(); ctx.translate(x,y); ctx.strokeStyle=color; ctx.lineWidth=1.2;
-    ctx.beginPath(); ctx.rect(-size*0.35, -size*0.9, size*0.7, size*1.8); ctx.stroke();
-    const arm = size*1.2, r=size*0.5; const pts=[[arm,arm],[arm,-arm],[-arm,arm],[-arm,-arm]];
-    for(const [ax,ay] of pts){ ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(ax*0.7,ay*0.7); ctx.stroke(); ctx.beginPath(); ctx.arc(ax,ay,r,0,Math.PI*2); ctx.stroke(); }
-    ctx.restore();
-  }
 
-  function drawTower(){
-    const x=tower.x, y=tower.y, h=tower.h, w=60; const head=radarHead();
-    ctx.save();
-    ctx.strokeStyle='#888'; ctx.lineWidth=1; ctx.beginPath(); ctx.rect(x-w, y+20, w*2, 14); ctx.stroke();
+function drawGrid(){
+  const head = radarHead();              // center of fade
 
-    ctx.lineWidth=1; ctx.strokeStyle='#aaa';
-    ctx.beginPath(); ctx.moveTo(x-w/3,y); ctx.lineTo(x-w/6, y-h);
-    ctx.moveTo(x+w/3,y); ctx.lineTo(x+w/6, y-h);
-    ctx.moveTo(x,y); ctx.lineTo(x, y-h);
-    ctx.stroke();
-
-    ctx.beginPath(); const levels=8; for(let i=0;i<levels;i++){ const y1=y - (i*(h/levels)); const y2=y - ((i+1)*(h/levels)); ctx.moveTo(x-w/3,y1); ctx.lineTo(x+w/3,y2); ctx.moveTo(x+w/3,y1); ctx.lineTo(x-w/3,y2); ctx.moveTo(x-w/3,y2); ctx.lineTo(x+w/3,y2);} ctx.stroke();
-
-    ctx.strokeStyle='#bbb'; ctx.strokeRect(x+w/3+6, y-40, 24, 28); ctx.strokeRect(x-w/3-30, y-60, 24, 18);
-
-    ctx.save(); ctx.lineWidth=2; ctx.strokeStyle='#ddd';
-    ctx.beginPath(); ctx.moveTo(head.x, y-h); ctx.lineTo(head.x, head.y); ctx.stroke();
-    ctx.translate(head.x, head.y); ctx.rotate(tower.sweep); ctx.beginPath(); ctx.moveTo(-82/2,0); ctx.lineTo(82/2,0); ctx.stroke(); ctx.restore();
-
-    ctx.restore();
-  }
-
-// ===== Beam: symmetric trapezoid (base = rod ends, sides diverge, circular top) =====
-function drawBeamFullBar(){
-  const head = radarHead();
-  const dir  = getBeamDir();      // forward (⊥ to rod)
-  const span = tower.span;        // half-angle the sides flare at
-  const R    = SWEEP_RANGE();     // radius of the outer arc
-
-  // Rod direction is perpendicular to the beam direction
-  const rodAngle = tower.sweep; // actual rotation of rod
-  const ux = Math.cos(rodAngle), uy = Math.sin(rodAngle);
-
-  // Rod endpoints A (left) and B (right) in world coords
-  const rodHalf = 41; // half rod length
-  const A = { x: head.x - ux*rodHalf, y: head.y - uy*rodHalf };
-  const B = { x: head.x + ux*rodHalf, y: head.y + uy*rodHalf };
-
-  // Side directions (diverging)
-  const vL = { x: Math.cos(dir + span), y: Math.sin(dir + span) }; // from A
-  const vR = { x: Math.cos(dir - span), y: Math.sin(dir - span) }; // from B
-
-  // Ray→circle intersection
-  function rayCircle(P, v){
-    const rx = v.x, ry = v.y;
-    const px = P.x - head.x, py = P.y - head.y;
-    const dot  = px*rx + py*ry;
-    const disc = dot*dot - (px*px + py*py - R*R);
-    if (disc < 0) return { x:P.x, y:P.y };
-    let t = -dot + Math.sqrt(disc);
-    if (t < 0) t = -dot - Math.sqrt(disc);
-    return { x: P.x + rx*t, y: P.y + ry*t };
-  }
-
-  // Outer arc endpoints
-  const D = rayCircle(A, vL); // top-left
-  const C = rayCircle(B, vR); // top-right
-
-  // Arc angles
-  let aL = Math.atan2(D.y - head.y, D.x - head.x);
-  let aR = Math.atan2(C.y - head.y, C.x - head.x);
-
-  const TWO_PI = Math.PI * 2;
-  let delta = (aL - aR) % TWO_PI; if (delta < 0) delta += TWO_PI;
-  const anticlockwise = delta > Math.PI;
-
-  // Draw shape
+  // 1) Draw the cartesian grid (uniform)
   ctx.save();
-  ctx.globalCompositeOperation = 'source-over';
-  ctx.fillStyle = 'rgba(200,200,200,0.30)';
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = getVar('--grid');
+  ctx.globalAlpha = 0.6;                // base grid strength
+  const s = 32;
 
-  ctx.beginPath();
-  ctx.moveTo(A.x, A.y);           // base left
-  ctx.lineTo(B.x, B.y);           // base right
-  ctx.lineTo(C.x, C.y);           // right side
-  ctx.arc(head.x, head.y, R, aR, aL, anticlockwise); // arc top
-  ctx.lineTo(A.x, A.y);           // left side
-  ctx.closePath();
-  ctx.fill();
+  for (let x = 0; x <= W; x += s) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+  for (let y = 0; y <= H; y += s) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
 
+  // 2) Radial fade mask (only affects what we've drawn so far = the grid)
+  const innerRadius = Math.max(80, Math.min(W, H) * 0.16);   // fully visible near head
+  const outerRadius = Math.max(W, H) * 0.65;                 // fades to 0 by here
+
+  const g = ctx.createRadialGradient(head.x, head.y, innerRadius,
+                                     head.x, head.y, outerRadius);
+  g.addColorStop(0.00, 'rgba(255,255,255,1)');
+  g.addColorStop(0.55, 'rgba(255,255,255,0.35)');
+  g.addColorStop(1.00, 'rgba(255,255,255,0)');
+
+  ctx.globalCompositeOperation = 'destination-in';
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
   ctx.restore();
 }
+  
+
+
+  // ===== Beam (symmetric trapezoid with soft gradient) =====
+  function drawBeamFullBar(){
+    const head = radarHead();
+    const dir  = getBeamDir();
+    const span = tower.span;
+    const R    = SWEEP_RANGE();
+
+    const rodAngle = tower.sweep;
+    const ux = Math.cos(rodAngle), uy = Math.sin(rodAngle);
+    const rodHalf = 30;
+    const A = { x: head.x - ux*rodHalf, y: head.y - uy*rodHalf };
+    const B = { x: head.x + ux*rodHalf, y: head.y + uy*rodHalf };
+
+    const vL = { x: Math.cos(dir + span), y: Math.sin(dir + span) };
+    const vR = { x: Math.cos(dir - span), y: Math.sin(dir - span) };
+
+    function rayCircle(P, v){
+      const rx = v.x, ry = v.y;
+      const px = P.x - head.x, py = P.y - head.y;
+      const dot  = px*rx + py*ry;
+      const disc = dot*dot - (px*px + py*py - R*R);
+      if (disc < 0) return { x:P.x, y:P.y };
+      let t = -dot + Math.sqrt(disc);
+      if (t < 0) t = -dot - Math.sqrt(disc);
+      return { x: P.x + rx*t, y: P.y + ry*t };
+    }
+
+    const D = rayCircle(A, vL); // top-left
+    const C = rayCircle(B, vR); // top-right
+
+    let aL = Math.atan2(D.y - head.y, D.x - head.x);
+    let aR = Math.atan2(C.y - head.y, C.x - head.x);
+    const TWO_PI = Math.PI * 2;
+    let delta = (aL - aR) % TWO_PI; if (delta < 0) delta += TWO_PI;
+    const anticlockwise = delta > Math.PI;
+
+    // Gradient fill (radial from head)
+    const g = ctx.createRadialGradient(head.x, head.y, 0, head.x, head.y, R);
+    g.addColorStop(0.00, getVar('--beam-core'));
+    g.addColorStop(0.25, getVar('--beam-fill'));
+    g.addColorStop(1.00, 'rgba(0,0,0,0)');
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.shadowBlur = 18;
+    ctx.shadowColor = 'rgba(160, 255, 120, .22)';     // NVG green
+    ctx.fillStyle = g;
+
+    ctx.beginPath();
+    ctx.moveTo(A.x, A.y);
+    ctx.lineTo(B.x, B.y);
+    ctx.lineTo(C.x, C.y);
+    ctx.arc(head.x, head.y, R, aR, aL, anticlockwise);
+    ctx.lineTo(A.x, A.y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ===== Tower & visuals =====
+  function drawTower(){
+    const x=tower.x, y=tower.y, h=tower.h; const head=radarHead();
+    ctx.save();
+
+    // Head rod
+    ctx.save();
+    ctx.lineWidth=2; ctx.strokeStyle='rgba(255,255,255,.95)'; ctx.shadowBlur=12; ctx.shadowColor='rgba(255,255,255,.35)';
+  
+    ctx.translate(head.x, head.y);
+    ctx.rotate(tower.sweep);
+    ctx.beginPath(); ctx.moveTo(-30,0); ctx.lineTo(30,0); ctx.stroke();
+    ctx.restore();
+
+    // Head crosshair
+    ctx.strokeStyle='rgba(255,255,255,.65)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.arc(head.x, head.y, 12, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(head.x-18, head.y); ctx.lineTo(head.x+18, head.y);
+    ctx.moveTo(head.x, head.y-18); ctx.lineTo(head.x, head.y+18); ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawRangeRing(){
+    const head = radarHead();
+    ctx.save();
+    ctx.setLineDash([6,6]);
+    ctx.strokeStyle=getVar('--locked'); ctx.lineWidth=0.5;
+    ctx.beginPath(); ctx.arc(head.x,head.y,tower.r,0,Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  // ===== Symbols =====
+  function drawEnemyTriangle(x,y,color){
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.strokeStyle=color;
+    ctx.lineWidth=1.4;
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = color + '55';
+
+    // enemy: downward triangle
+    const s=8;
+    ctx.beginPath();
+    ctx.moveTo(0, s);
+    ctx.lineTo(-s, -s);
+    ctx.lineTo(s, -s);
+    ctx.closePath();
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawFriendlyChevron(x,y,color){
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.strokeStyle=color;
+    ctx.lineWidth=1.4;
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = color + '55';
+
+    const s=9;
+    ctx.beginPath();
+    ctx.moveTo(-s, -s*0.4);
+    ctx.lineTo(0, s*0.8);
+    ctx.lineTo(s, -s*0.4);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // NEW: lock bracket drawn only when detected; white outside ring, red inside
+  function drawLockBracket(x,y,color){
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+
+    ctx.beginPath();
+    // TL
+    ctx.moveTo(-10,-12); ctx.lineTo(-16,-12); ctx.lineTo(-16,-6);
+    // TR
+    ctx.moveTo(10,-12);  ctx.lineTo(16,-12);  ctx.lineTo(16,-6);
+    // BL
+    ctx.moveTo(-10,12);  ctx.lineTo(-16,12);  ctx.lineTo(-16,6);
+    // BR
+    ctx.moveTo(10,12);   ctx.lineTo(16,12);   ctx.lineTo(16,6);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawDrones(){
+  const head = radarHead();
+
+  // Links from head to detected targets (white outside ring, red inside)
+  if (SHOW_TRACK_LINES) {
+    for (const e of enemies) {
+      if (e.dead || !e.detected) continue;
+      const distHead = Math.hypot(e.x - head.x, e.y - head.y);
+      const col = (distHead <= tower.r) ? getVar('--locked') : '#ffffff';
+      ctx.strokeStyle = col; ctx.lineWidth = 0.8; ctx.globalAlpha = 0.9;
+      ctx.beginPath(); ctx.moveTo(head.x, head.y); ctx.lineTo(e.x, e.y); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+
+    // Enemy / Defender symbols
+    for(const e of enemies){
+      if(e.dead) continue;
+      // Enemy triangle color can still reflect "locked" state (red once inside ring)
+      const triColor = e.locked ? getVar('--locked') : '#ffffff';
+      drawEnemyTriangle(e.x, e.y, triColor);
+
+      // Lock brackets ONLY when detected; white outside ring, red inside ring
+      if(e.detected){
+        const distHead=Math.hypot(e.x-head.x, e.y-head.y);
+        const bracketColor = (distHead<=tower.r) ? getVar('--locked') : '#ffffff';
+        drawLockBracket(e.x, e.y, bracketColor);
+      }
+    }
+    for(const d of defenders){
+      if(d.dead) continue;
+      drawFriendlyChevron(d.x, d.y, getVar('--defender'));
+    }
+  }
+
+  function drawPops(){
+    for(const p of pops){
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, p.a);
+      ctx.fillStyle = '#ffffff';
+      ctx.shadowBlur = 18;
+      ctx.shadowColor = 'rgba(255,255,255,.8)';
+      ctx.beginPath(); ctx.arc(p.x,p.y,5,0,Math.PI*2); ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawScanlines(){
+    ctx.save();
+    ctx.globalAlpha = 0.06;
+    for(let y=0; y<H; y+=2){
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0,y,W,1);
+    }
+    ctx.restore();
+  }
+
+  function drawVignette(){
+    const g = ctx.createRadialGradient(W*0.5, H*0.5, Math.min(W,H)*0.2, W*0.5, H*0.5, Math.max(W,H)*0.7);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(1, 'rgba(0,0,0,0.5)');
+    ctx.save();
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,W,H);
+    ctx.restore();
+  }
 
   function draw(){
     ctx.clearRect(0,0,W,H);
 
-    const head = radarHead();
+  
 
-    // Beam first
+    // Background layers
+    drawGrid();
     drawBeamFullBar();
 
-    // Inner dashed radius — RED and centered at HEAD
-    ctx.setLineDash([6,6]); ctx.strokeStyle=getVar('--locked'); ctx.lineWidth=1; ctx.beginPath(); ctx.arc(head.x,head.y,tower.r,0,Math.PI*2); ctx.stroke(); ctx.setLineDash([]);
+    // Tactical layers
+    drawRangeRing();
+    drawDrones();
+    drawPops();
 
-    // Tracking links from head
-    for(const e of enemies){ if(e.dead || !e.detected) continue; const distHead=Math.hypot(e.x-head.x, e.y-head.y); const col = (e.locked || distHead<=tower.r) ? getVar('--locked') : '#fff'; ctx.strokeStyle=col; ctx.lineWidth=0.8; ctx.beginPath(); ctx.moveTo(head.x,head.y); ctx.lineTo(e.x,e.y); ctx.stroke(); }
-
-    // Drones
-    for(const e of enemies){ if(e.dead) continue; drawDroneProfile(e.x,e.y, e.locked ? getVar('--locked') : '#fff'); }
-    for(const d of defenders){ if(d.dead) continue; drawDroneProfile(d.x,d.y, getVar('--defender')); }
-
-    // Pops
-    for(const p of pops){ ctx.globalAlpha=p.a; ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(p.x,p.y,5,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1; }
-
-    // Tower last
+    // Foreground: Tower + FX
     drawTower();
+
+    // Screen treatments
+    drawScanlines();
+    drawVignette();
   }
 
-  function getVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  // ===== HUD updater (top-left only) =====
+  let hudTimer = 0;
+  function updateHUD(dt){
+    hudTimer += dt;
+    if(hudTimer < 0.25) return; // reduce DOM churn
+    hudTimer = 0;
+
+    const tracks = enemies.reduce((n, e) => n + (e.detected ? 1 : 0), 0);
+    const locks  = enemies.reduce((n, e) => n + (e.locked   ? 1 : 0), 0);
+    const defendersActive = defenders.length;
+
+    hudTL.innerHTML = `
+      <div><span class="k">Tracks</span><span class="v">${tracks}</span></div>
+      <div><span class="k">Locks</span><span class="v" style="color:${getVar('--locked')}">${locks}</span></div>
+      <div><span class="k">Interceptions</span><span class="v">${KILLS}</span></div>
+      <div><span class="k">Defenders</span><span class="v" style="color:${getVar('--defender')}">${defendersActive}</span></div>
+    `;
+  }
 
   // ===== Lightweight runtime tests =====
   function runTests(){
     const diff = ((getBeamDir() - (tower.sweep + Math.PI/2) + Math.PI*3)%(Math.PI*2))-Math.PI;
     console.assert(Math.abs(diff) < 1e-6, 'Beam not perpendicular to rod');
-    for(let k=0;k<5;k++){
-      const a=enemies[(Math.random()*enemies.length)|0], b=enemies[(Math.random()*enemies.length)|0];
-      if(a&&b&&a!==b) console.assert(Math.hypot(a.x-b.x,a.y-b.y) >= SEP_EN-1, 'Enemy overlap');
-    }
     try { drawBeamFullBar(); } catch (e) { console.error('Beam draw failed', e); }
   }
   setInterval(runTests, 5000);
 
   // ===== Loop =====
-  function loop(now){ const dt=Math.min(0.05,(now-last)/1000||0.016); last=now||performance.now(); if(!paused) step(dt); draw(); requestAnimationFrame(loop); }
-  function init(){ resize(); for(let i=0;i<5;i++) enemies.push(spawnEnemy()); last=performance.now(); requestAnimationFrame(loop); }
-  if(document.readyState==='loading') window.addEventListener('DOMContentLoaded', init); else init();
+  function loop(nowMs){
+    const now = nowMs || performance.now();
+    const dt = Math.min(0.05, (now-last)/1000 || 0.016);
+    // FPS (for internal smoothing only)
+    fpsAccum += 1/dt; fpsSamples++;
+    if(!lastFpsT) lastFpsT = now;
+    if(now - lastFpsT > 500){ fps = Math.max(1, Math.round(fpsAccum / fpsSamples)); fpsAccum = 0; fpsSamples = 0; lastFpsT = now; }
+
+    last = now;
+    if(!paused) step(dt);
+    draw();
+    updateHUD(dt);
+    requestAnimationFrame(loop);
+  }
+
+  function init(){
+    setSize();
+    for(let i=0;i<6;i++) enemies.push(spawnEnemy());
+    last = performance.now();
+    requestAnimationFrame(loop);
+  }
+  if(document.readyState==='loading') window.addEventListener('DOMContentLoaded', init);
+  else init();
+
   </script>
 </body>
 </html>
